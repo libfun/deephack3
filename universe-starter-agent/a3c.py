@@ -73,7 +73,7 @@ QBatch = namedtuple("QBatch", ["ls", "a", "r", "ns", "terminal", "last_features"
 
 class ReplayMemmory(object):
 
-    def __init__(self, size=10000, batch_size=32):
+    def __init__(self, size=100000, batch_size=1):
         self.size = size
         self.queue = deque(maxlen=size)
         self.batch_size = batch_size
@@ -233,7 +233,7 @@ class A3C(object):
             # loss of value function
             vf_loss = 0.5 * tf.reduce_sum(tf.square(pi.vf - self.r))
             entropy = - tf.reduce_sum(prob_tf * log_prob_tf)
-            self.q = 0.1 * (log_prob_tf + entropy) + pi.vf
+            self.q = 0.05 * (log_prob_tf + entropy) + pi.vf
             self.max_q = tf.reduce_max(self.q, axis=1)
 
             bs = tf.to_float(tf.shape(pi.x)[0])
@@ -330,23 +330,6 @@ self explanatory:  take a rollout from the queue of the thread runner.
         else:
             fetches = [self.train_op, self.global_step]
 
-        if len(self.runner.replay_mem.queue) > 1000:
-            qbatch = self.runner.replay_mem.sample()
-            q_max = sess.run(self.max_q, {self.local_network.x: qbatch.ns,
-                                  self.local_network.state_in[0]: qbatch.features[0, 0],
-                                  self.local_network.state_in[1]: qbatch.features[0, 1]})
-            q = sess.run(self.q, {self.local_network.x: qbatch.ls,
-                                self.local_network.state_in[0]: qbatch.last_features[0, 0],
-                                self.local_network.state_in[1]: qbatch.last_features[0, 1]})
-            q_update = qbatch.r + q_max + (q*qbatch.a).sum()
-            feed_dict = {
-                self.local_network.x: qbatch.ls,
-                self.local_network.state_in[0]: qbatch.last_features[0, 0],
-                self.local_network.state_in[1]: qbatch.last_features[0, 1],
-                self.q_upd: q_update
-                
-            }
-            sess.run(self.train_q_op, feed_dict=feed_dict)
             
         feed_dict = {
             self.local_network.x: batch.si,
@@ -358,7 +341,26 @@ self explanatory:  take a rollout from the queue of the thread runner.
         }
 
         fetched = sess.run(fetches, feed_dict=feed_dict)
+
         if should_compute_summary:
             self.summary_writer.add_summary(tf.Summary.FromString(fetched[0]), fetched[-1])
             self.summary_writer.flush()
+
+        if len(self.runner.replay_mem.queue) > 100000:
+            qbatch = self.runner.replay_mem.sample()
+            q_max = sess.run(self.max_q, {self.local_network.x: qbatch.ns,
+                                  self.local_network.state_in[0]: qbatch.features[0, 0],
+                                  self.local_network.state_in[1]: qbatch.features[0, 1]})
+            q = sess.run(self.q, {self.local_network.x: qbatch.ls,
+                                self.local_network.state_in[0]: qbatch.last_features[0, 0],
+                                self.local_network.state_in[1]: qbatch.last_features[0, 1]})
+            q_update = qbatch.r + q_max - (q*qbatch.a).sum() if not qbatch.terminal else qbatch.r + (q*qbatch.a).sum()
+            feed_dict = {
+                self.local_network.x: qbatch.ls,
+                self.local_network.state_in[0]: qbatch.last_features[0, 0],
+                self.local_network.state_in[1]: qbatch.last_features[0, 1],
+                self.q_upd: q_update
+            }
+            sess.run(self.train_q_op, feed_dict=feed_dict)
+
         self.local_steps += 1
