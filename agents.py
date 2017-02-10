@@ -152,8 +152,10 @@ class AtariRescale42x42(vectorized.ObservationWrapper):
         return [_process_frame42(observation) for observation in observation_n]
 
 
-def create_atari_env(env_id):
+def create_atari_env(env_id, seed=None):
     env = gym.make(env_id)
+    if seed is not None:
+        env.seed(seed)
     env = Vectorize(env)
     env = AtariRescale42x42(env)
     env = DiagnosticsInfo(env)
@@ -164,13 +166,13 @@ class A3C(object):
 
     def __init__(self, env, MONITOR_LOCATION, CHECKPOINT_LOCATION, NUM_EPISODES):
 
-        self.env = env
         self.MONITOR_LOCATION = MONITOR_LOCATION
         self.chkpt = tf.train.latest_checkpoint(CHECKPOINT_LOCATION)
         self.NUM_EPISODES = NUM_EPISODES
+        self.rewards = []
         # logger.info("Loading checkpoint {}".format(chkpt))
 
-    def play(self):
+    def play(self, num_episodes, env, record=False, seed=None, tst=True):
         with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=False)) as sess, sess.as_default():
             saver = tf.train.import_meta_graph(self.chkpt + ".meta", clear_devices=True)
             g = tf.get_default_graph()
@@ -193,8 +195,15 @@ class A3C(object):
 
             lengths = []
             rewards = []
-            for ep in range(self.NUM_EPISODES):
-                obs = env.reset()
+            self.rewards = []
+
+            if record:
+                self.env = wrappers.Monitor(create_atari_env(env, seed),
+                                            'result_' + env, force=True)
+            else:
+                self.env = create_atari_env(env, seed)
+            for ep in range(num_episodes):
+                obs = self.env.reset()
 
                 initial_state = np.zeros((1,256)).astype(float)
                 last_state = [initial_state, initial_state]
@@ -209,44 +218,86 @@ class A3C(object):
 
                     state, sampled_action = sess.run([get_output_state, get_sample_op], feed_dict = feed_dict)
                     action = sampled_action #.argmax()
-                    obs, reward, terminal, info = env.step(action)
+                    obs, reward, terminal, info = self.env.step(action)
 
                     last_state = state
                     length += 1
                     reward_sum += reward
+                    self.rewards.append(reward)
                     # print("Episode finished in {} reward: {}".format(length, rewards))
                 lengths.append(length)
+                print(env + ' UN, score: ', reward_sum)
                 rewards.append(reward_sum)
-            return sum(rewards)/float(len(rewards))
+        return sum(rewards)/float(len(rewards))
+
+    def do_submit(self, output, key=''):
+        gym.upload(output, api_key=key)
+
 
 class RandomAgent(object):
 
-    def __init__(self, env, NUM_EPISODES):
-        self.env = env
-        self.NUM_EPISODES = NUM_EPISODES
+    def __init__(self):
+        self.env = ''
 
-    def play(self):
-        env = gym.make(env)
+    def play(self, num_episodes, env, record = False, seed = None):
+        self.env = gym.make(env)
+        if seed is not None:
+            self.env.seed(seed)
+        if record:
+            self.env = wrappers.Monitor(env, 'result_' + env)
         rewards = []
         for i_episode in range(num_episodes):
-            observation = env.reset()
+            observation = self.env.reset()
             total = 0
             for t in range(10000):
-                action = env.action_space.sample()
-                observation, reward, done, info = env.step(action)
+                action = self.env.action_space.sample()
+                observation, reward, done, info = self.env.step(action)
                 total += reward
                 if done:
                     break
             rewards.append(total)
+            print(env + ' RD, score: ', total)
         return sum(rewards)/float(len(rewards))
+    
+
+class Model(ModelDesc):
+    def _get_inputs(self):
+        assert NUM_ACTIONS is not None
+        return [InputVar(tf.float32, (None,) + IMAGE_SHAPE3, 'state'),
+                InputVar(tf.int32, (None,), 'action'),
+                InputVar(tf.float32, (None,), 'futurereward')]
+
+    def _get_NN_prediction(self, image):
+        image = image / 255.0
+        with argscope(Conv2D, nl=tf.nn.relu):
+            l = Conv2D('conv0', image, out_channel=32, kernel_shape=5)
+            l = MaxPooling('pool0', l, 2)
+            l = Conv2D('conv1', l, out_channel=32, kernel_shape=5)
+            l = MaxPooling('pool1', l, 2)
+            l = Conv2D('conv2', l, out_channel=64, kernel_shape=4)
+            l = MaxPooling('pool2', l, 2)
+            l = Conv2D('conv3', l, out_channel=64, kernel_shape=3)
+
+        l = FullyConnected('fc0', l, 512, nl=tf.identity)
+        l = PReLU('prelu', l)
+        policy = FullyConnected('fc-pi', l, out_dim=NUM_ACTIONS, nl=tf.identity)
+        return policy
+
+    def _build_graph(self, inputs):
+        state, action, futurereward = inputs
+        policy = self._get_NN_prediction(state)
+        self.logits = tf.nn.softmax(policy, name='logits')
 
 
-class TBAgent(object):
-    def __init__(self, env, NUM_EPISODES, loader=None):
+class TPAgent(object):
+    def __init__(self, env, MONITOR_LOCATION, CHECKPOINT_LOCATION, NUM_EPISODES):
         self.env = env
         self.NUM_EPISODES = NUM_EPISODES
 
-        self.loader = loader
+        self.load = CHECKPOINT_LOCATION
+        self.save = MONITOR_LOCATION
+        self.predfunc = ''
+        self.player = None
 
         ENV_NAME = self.env
         assert ENV_NAME
@@ -254,17 +305,17 @@ class TBAgent(object):
         p = self.get_player()
         del p    # set NUM_ACTIONS
 
-        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+        os.environ['CUDA_VISIBLE_DEVICES'] = '0'# args.gpu
 
         self.cfg = PredictConfig(
             model=Model(),
-            session_init=SaverRestore(self.loader),
+            session_init=SaverRestore(self.load),
             input_names=['state'],
             output_names=['logits'])
         # run_submission(self.cfg, args.output, args.episode)
 
-    def get_player(dumpdir=None):
-        pl = GymEnv(self.env, dumpdir=dumpdir, auto_restart=False)
+    def get_player(self, dumpdir=None, seed=None):
+        pl = GymEnv(self.env, dumpdir=dumpdir, auto_restart=False, seed=seed)
         pl = MapPlayerState(pl, lambda img: cv2.resize(img, IMAGE_SIZE[::-1]))
 
         global NUM_ACTIONS
@@ -274,59 +325,30 @@ class TBAgent(object):
         return pl
 
 
-    class Model(ModelDesc):
-        def _get_inputs(self):
-            assert NUM_ACTIONS is not None
-            return [InputVar(tf.float32, (None,) + IMAGE_SHAPE3, 'state'),
-                    InputVar(tf.int32, (None,), 'action'),
-                    InputVar(tf.float32, (None,), 'futurereward')]
-
-        def _get_NN_prediction(self, image):
-            image = image / 255.0
-            with argscope(Conv2D, nl=tf.nn.relu):
-                l = Conv2D('conv0', image, out_channel=32, kernel_shape=5)
-                l = MaxPooling('pool0', l, 2)
-                l = Conv2D('conv1', l, out_channel=32, kernel_shape=5)
-                l = MaxPooling('pool1', l, 2)
-                l = Conv2D('conv2', l, out_channel=64, kernel_shape=4)
-                l = MaxPooling('pool2', l, 2)
-                l = Conv2D('conv3', l, out_channel=64, kernel_shape=3)
-
-            l = FullyConnected('fc0', l, 512, nl=tf.identity)
-            l = PReLU('prelu', l)
-            policy = FullyConnected('fc-pi', l, out_dim=NUM_ACTIONS, nl=tf.identity)
-            return policy
-
-        def _build_graph(self, inputs):
-            state, action, futurereward = inputs
-            policy = self._get_NN_prediction(state)
-            self.logits = tf.nn.softmax(policy, name='logits')
+    def do_submit(self, output, key=''):
+        gym.upload(output, api_key=key)
 
 
-    def run_submission(self, cfg, output=None, nr=self.NUM_EPISODES):
-        player = get_player(dumpdir=None)
-        predfunc = get_predict_func(cfg)
-        logger.info("Start evaluation: ")
-        for k in range(self.NUM_EPISODES):
-            if k != 0:
-                player.restart_episode()
-            score = play_one_episode(player, predfunc)
-            print("Score:", score)
-
-
-    def do_submit(self, output):
-        gym.upload(output, api_key='xxx')
-
-
-    def play(self):
-        player = self.get_player(dumpdir=None)
-        predfunc = self.get_predict_func(self.cfg)
+    def play(self, num_episodes, env, record=False, seed=None, tst=False):
+        load = None
+        if record:
+            load = self.save
+        self.player = self.get_player(dumpdir=load, seed=seed)
+        if not record:
+            self.predfunc = get_predict_func(self.cfg)
+        if tst:
+            self.predfunc = get_predict_func(self.cfg)
         rewards = []
+        if seed is not None:
+            print('set seed', seed)
+            self.player.player.player.gymenv.seed(seed)
         # logger.info("Start evaluation: ")
-        for k in range(self.NUM_EPISODES):
+        for k in range(num_episodes):
             if k != 0:
-                player.restart_episode()
-            score = play_one_episode(player, predfunc)
+                self.player.restart_episode()
+            score = play_one_episode(self.player, self.predfunc)
+            print(env + ' TP, score: ', score)
             rewards.append(score)
         return sum(rewards)/float(len(rewards))
 
+    

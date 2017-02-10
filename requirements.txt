@@ -1,0 +1,19 @@
+atari-py==0.0.18
+Box2D==2.3.2
+go-vncdriver==0.4.19
+-e git+https://github.com/openai/gym@cde3b5e63b886ce3303f6d0d92e95560df0b887d#egg=gym
+ipykernel==4.5.2
+ipython==5.1.0
+ipython-genutils==0.1.0
+ipywidgets==5.2.2
+jupyter==1.0.0
+nbconvert==5.0.0
+nbformat==4.2.0
+notebook==4.3.1
+numpy==1.11.3
+opencv-python==3.2.0.6
+pachi-py==0.0.21
+scipy==0.18.1
+tensorflow-gpu==0.12.0rc1
+tqdm==4.11.2
+universe==0.21.2

@@ -1,0 +1,6 @@
+model_checkpoint_path: "/home/ubuntu/centipede-a3c/train/model.ckpt-99995010"
+all_model_checkpoint_paths: "/home/ubuntu/centipede-a3c/train/model.ckpt-99836373"
+all_model_checkpoint_paths: "/home/ubuntu/centipede-a3c/train/model.ckpt-99876052"
+all_model_checkpoint_paths: "/home/ubuntu/centipede-a3c/train/model.ckpt-99915537"
+all_model_checkpoint_paths: "/home/ubuntu/centipede-a3c/train/model.ckpt-99955183"
+all_model_checkpoint_paths: "/home/ubuntu/centipede-a3c/train/model.ckpt-99995010"
