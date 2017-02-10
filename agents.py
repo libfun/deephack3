@@ -202,7 +202,7 @@ class RandomAgent(object):
         self.env = env
         self.NUM_EPISODES = NUM_EPISODES
 
-    def play(self, ):
+    def play(self):
         env = gym.make(env)
         rewards = []
         for i_episode in range(num_episodes):

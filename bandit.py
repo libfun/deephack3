@@ -6,8 +6,8 @@ class MultiArmedBandit(object):
         self.k = len(agents)
         self.agents = agents
 
-    def pull(self, agent, num_episodes):
-        return agent.play(num_episodes)
+    def pull(self, agent):
+        return agent.play()
         
 
 class Player(object):
@@ -69,7 +69,7 @@ class Environment(object):
     def reset(self):
         self.player.reset()
 
-    def run(self, trials=100, experiments=1):
+    def run(self, trials=100, experiments=10):
         scores = np.zeros((trials, 1))
 
         for _ in range(experiments):
