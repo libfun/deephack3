@@ -242,9 +242,11 @@ class RandomAgent(object):
 
 
 class TBAgent(object):
-    def __init__(self, env, NUM_EPISODES):
+    def __init__(self, env, NUM_EPISODES, loader=None):
         self.env = env
         self.NUM_EPISODES = NUM_EPISODES
+
+        self.loader = loader
 
         ENV_NAME = self.env
         assert ENV_NAME
@@ -256,7 +258,7 @@ class TBAgent(object):
 
         self.cfg = PredictConfig(
             model=Model(),
-            session_init=SaverRestore(),
+            session_init=SaverRestore(self.loader),
             input_names=['state'],
             output_names=['logits'])
         # run_submission(self.cfg, args.output, args.episode)
