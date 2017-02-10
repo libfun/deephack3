@@ -1,19 +1,16 @@
 from __future__ import print_function
-from collections import namedtuple, deque
+from collections import namedtuple
 import numpy as np
 import tensorflow as tf
 from model import LSTMPolicy
 import six.moves.queue as queue
 import scipy.signal
 import threading
-import random
 import distutils.version
 use_tf12_api = distutils.version.LooseVersion(tf.VERSION) >= distutils.version.LooseVersion('0.12.0')
 
-
 def discount(x, gamma):
     return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1]
-
 
 def process_rollout(rollout, gamma, lambda_=1.0):
     """
@@ -35,7 +32,6 @@ given a rollout, compute its returns and the advantage
     return Batch(batch_si, batch_a, batch_adv, batch_r, rollout.terminal, features)
 
 Batch = namedtuple("Batch", ["si", "a", "adv", "r", "terminal", "features"])
-
 
 class PartialRollout(object):
     """
@@ -69,44 +65,13 @@ once it has processed enough steps.
         self.terminal = other.terminal
         self.features.extend(other.features)
 
-QBatch = namedtuple("QBatch", ["ls", "a", "r", "ns", "terminal", "last_features", "features"])
-
-class ReplayMemmory(object):
-
-    def __init__(self, size=100000, batch_size=1):
-        self.size = size
-        self.queue = deque(maxlen=size)
-        self.batch_size = batch_size
-
-    @property
-    def full(self):
-        return len(self.queue) == self.size
-
-    def add(self, state, action, reward, next_state, done, last_features, features):
-        self.queue.append((state, action, reward, next_state, done, last_features, features))
-
-    def sample(self):
-        batch = random.sample(self.queue, self.batch_size)
-        states, actions, rewards, next_states, dones, last_features, features = [], [], [], [], [], [], []
-        for s, a, r, ns, d, l_f, f in batch:
-            states.append(s)
-            actions.append(a)
-            rewards.append(r)
-            next_states.append(ns)
-            dones.append(float(d))
-            last_features.append(l_f)
-            features.append(f)
-        return QBatch(np.array(states), np.array(actions), np.array(rewards),
-                np.array(next_states), np.array(dones), np.array(last_features), np.array(features))
-
-
 class RunnerThread(threading.Thread):
     """
 One of the key distinctions between a normal environment and a universe environment
 is that a universe environment is _real time_.  This means that there should be a thread
 that would constantly interact with the environment and tell it what to do.  This thread is here.
 """
-    def __init__(self, env, policy, num_local_steps):
+    def __init__(self, env, policy, num_local_steps, visualise):
         threading.Thread.__init__(self)
         self.queue = queue.Queue(5)
         self.num_local_steps = num_local_steps
@@ -116,7 +81,7 @@ that would constantly interact with the environment and tell it what to do.  Thi
         self.daemon = True
         self.sess = None
         self.summary_writer = None
-        self.replay_mem = ReplayMemmory(batch_size=1)
+        self.visualise = visualise
 
     def start_runner(self, sess, summary_writer):
         self.sess = sess
@@ -128,7 +93,7 @@ that would constantly interact with the environment and tell it what to do.  Thi
             self._run()
 
     def _run(self):
-        rollout_provider = env_runner(self.env, self.policy, self.num_local_steps, self.summary_writer, self.replay_mem)
+        rollout_provider = env_runner(self.env, self.policy, self.num_local_steps, self.summary_writer, self.visualise)
         while True:
             # the timeout variable exists because apparently, if one worker dies, the other workers
             # won't die with it, unless the timeout is set to some large number.  This is an empirical
@@ -137,7 +102,8 @@ that would constantly interact with the environment and tell it what to do.  Thi
             self.queue.put(next(rollout_provider), timeout=600.0)
 
 
-def env_runner(env, policy, num_local_steps, summary_writer, replay_mem=None):
+
+def env_runner(env, policy, num_local_steps, summary_writer, render):
     """
 The logic of the thread runner.  In brief, it constantly keeps on running
 the policy, and as long as the rollout exceeds a certain length, the thread
@@ -157,12 +123,12 @@ runner appends the policy to the queue.
             action, value_, features = fetched[0], fetched[1], fetched[2:]
             # argmax to convert from one-hot
             state, reward, terminal, info = env.step(action.argmax())
+            #reward = reward / 10000.
+            if render:
+                env.render()
 
             # collect the experience
             rollout.add(last_state, action, reward, value_, terminal, last_features)
-            if replay_mem:
-                replay_mem.add(last_state, action, reward, state, terminal, last_features, features)
-
             length += 1
             rewards += reward
 
@@ -193,15 +159,14 @@ runner appends the policy to the queue.
         # once we have enough experience, yield it, and have the ThreadRunner place it on a queue
         yield rollout
 
-
 class A3C(object):
-    def __init__(self, env, task):
+    def __init__(self, env, task, visualise):
         """
-        An implementation of the A3C algorithm that is reasonably well-tuned for the VNC environments.
-        Below, we will have a modest amount of complexity due to the way TensorFlow handles data parallelism.
-        But overall, we'll define the model, specify its inputs, and describe how the policy gradients step
-        should be computed.
-        """
+An implementation of the A3C algorithm that is reasonably well-tuned for the VNC environments.
+Below, we will have a modest amount of complexity due to the way TensorFlow handles data parallelism.
+But overall, we'll define the model, specify its inputs, and describe how the policy gradients step
+should be computed.
+"""
 
         self.env = env
         self.task = task
@@ -220,7 +185,6 @@ class A3C(object):
             self.ac = tf.placeholder(tf.float32, [None, env.action_space.n], name="ac")
             self.adv = tf.placeholder(tf.float32, [None], name="adv")
             self.r = tf.placeholder(tf.float32, [None], name="r")
-            self.q_upd = tf.placeholder(tf.float32, [None], name="q_upd")
 
             log_prob_tf = tf.nn.log_softmax(pi.logits)
             prob_tf = tf.nn.softmax(pi.logits)
@@ -233,16 +197,9 @@ class A3C(object):
             # loss of value function
             vf_loss = 0.5 * tf.reduce_sum(tf.square(pi.vf - self.r))
             entropy = - tf.reduce_sum(prob_tf * log_prob_tf)
-            self.q = 0.05 * (log_prob_tf + entropy) + pi.vf
-            self.max_q = tf.reduce_max(self.q, axis=1)
 
             bs = tf.to_float(tf.shape(pi.x)[0])
             self.loss = pi_loss + 0.5 * vf_loss - entropy * 0.01
-
-            # q_max = 0.1 * (tf.reduce_max(log_prob_tf, axis=1) - entropy) + pi.vf
-            # q_residual = q_max
-            # print("Q max shape: " + str(q_max.get_shape()))
-            # print("Loss shape: " + str(pi_loss.get_shape()))
 
             # 20 represents the number of "local steps":  the number of timesteps
             # we run the policy before we update the parameters.
@@ -250,19 +207,17 @@ class A3C(object):
             # on the one hand;  but on the other hand, we get less frequent parameter updates, which
             # slows down learning.  In this code, we found that making local steps be much
             # smaller than 20 makes the algorithm more difficult to tune and to get to work.
-            self.runner = RunnerThread(env, pi, 20)
+            self.runner = RunnerThread(env, pi, 20, visualise)
+
 
             grads = tf.gradients(self.loss, pi.var_list)
-            q_grads = tf.gradients(self.q_upd * (log_prob_tf + pi.vf), pi.var_list)
 
             if use_tf12_api:
                 tf.summary.scalar("model/policy_loss", pi_loss / bs)
                 tf.summary.scalar("model/value_loss", vf_loss / bs)
                 tf.summary.scalar("model/entropy", entropy / bs)
-                # tf.summary.scalar("model/q_max", tf.reduce_mean(q_max) / bs)
                 tf.summary.image("model/state", pi.x)
                 tf.summary.scalar("model/grad_global_norm", tf.global_norm(grads))
-                #tf.summary.scalar("model/q_grad_global_norm", tf.global_norm(q_grads))
                 tf.summary.scalar("model/var_global_norm", tf.global_norm(pi.var_list))
                 self.summary_op = tf.summary.merge_all()
 
@@ -276,22 +231,16 @@ class A3C(object):
                 self.summary_op = tf.merge_all_summaries()
 
             grads, _ = tf.clip_by_global_norm(grads, 40.0)
-            q_grads, _ = tf.clip_by_global_norm(q_grads, 40.0)
 
             # copy weights from the parameter server to the local model
             self.sync = tf.group(*[v1.assign(v2) for v1, v2 in zip(pi.var_list, self.network.var_list)])
 
             grads_and_vars = list(zip(grads, self.network.var_list))
-            q_grads_and_vars = list(zip(q_grads, self.network.var_list))
-
             inc_step = self.global_step.assign_add(tf.shape(pi.x)[0])
 
             # each worker has a different set of adam optimizer parameters
-            opt = tf.train.AdamOptimizer(1e-3)
-            q_opt = tf.train.AdamOptimizer(5e-4)
-
+            opt = tf.train.AdamOptimizer(1e-4)
             self.train_op = tf.group(opt.apply_gradients(grads_and_vars), inc_step)
-            self.train_q_op = q_opt.apply_gradients(q_grads_and_vars)
             self.summary_writer = None
             self.local_steps = 0
 
@@ -313,24 +262,22 @@ self explanatory:  take a rollout from the queue of the thread runner.
 
     def process(self, sess):
         """
-        process grabs a rollout that's been produced by the thread runner,
-        and updates the parameters.  The update is then sent to the parameter
-        server.
-        """
+process grabs a rollout that's been produced by the thread runner,
+and updates the parameters.  The update is then sent to the parameter
+server.
+"""
 
         sess.run(self.sync)  # copy weights from shared to local
         rollout = self.pull_batch_from_queue()
-        batch = process_rollout(rollout, gamma=0.99, lambda_=1.0)
+        batch = process_rollout(rollout, gamma=.9, lambda_=1.0)
 
         should_compute_summary = self.task == 0 and self.local_steps % 11 == 0
-
 
         if should_compute_summary:
             fetches = [self.summary_op, self.train_op, self.global_step]
         else:
             fetches = [self.train_op, self.global_step]
 
-            
         feed_dict = {
             self.local_network.x: batch.si,
             self.ac: batch.a,
@@ -345,22 +292,4 @@ self explanatory:  take a rollout from the queue of the thread runner.
         if should_compute_summary:
             self.summary_writer.add_summary(tf.Summary.FromString(fetched[0]), fetched[-1])
             self.summary_writer.flush()
-
-        if len(self.runner.replay_mem.queue) > 100000:
-            qbatch = self.runner.replay_mem.sample()
-            q_max = sess.run(self.max_q, {self.local_network.x: qbatch.ns,
-                                  self.local_network.state_in[0]: qbatch.features[0, 0],
-                                  self.local_network.state_in[1]: qbatch.features[0, 1]})
-            q = sess.run(self.q, {self.local_network.x: qbatch.ls,
-                                self.local_network.state_in[0]: qbatch.last_features[0, 0],
-                                self.local_network.state_in[1]: qbatch.last_features[0, 1]})
-            q_update = qbatch.r + q_max - (q*qbatch.a).sum() if not qbatch.terminal else qbatch.r + (q*qbatch.a).sum()
-            feed_dict = {
-                self.local_network.x: qbatch.ls,
-                self.local_network.state_in[0]: qbatch.last_features[0, 0],
-                self.local_network.state_in[1]: qbatch.last_features[0, 1],
-                self.q_upd: q_update
-            }
-            sess.run(self.train_q_op, feed_dict=feed_dict)
-
         self.local_steps += 1

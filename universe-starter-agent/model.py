@@ -10,8 +10,7 @@ def normalized_columns_initializer(std=1.0):
     return _initializer
 
 def flatten(x):
-    x_shape = x.get_shape().as_list()
-    return tf.reshape(x, [-1, np.prod(x_shape[1:])])
+    return tf.reshape(x, [-1, np.prod(x.get_shape().as_list()[1:])])
 
 def conv2d(x, num_filters, name, filter_size=(3, 3), stride=(1, 1), pad="SAME", dtype=tf.float32, collections=None):
     with tf.variable_scope(name):
@@ -43,30 +42,26 @@ def categorical_sample(logits, d):
     value = tf.squeeze(tf.multinomial(logits - tf.reduce_max(logits, [1], keep_dims=True), 1), [1])
     return tf.one_hot(value, d)
 
+
 class LSTMPolicy(object):
     def __init__(self, ob_space, ac_space):
-        self.x = x = tf.placeholder(tf.float32, [None] + list(ob_space), name='pixel_input')
-        print("Input shape " + str(x.get_shape()))
+        self.x = x = tf.placeholder(tf.float32, [None] + list(ob_space))
 
         for i in range(4):
             x = tf.nn.elu(conv2d(x, 32, "l{}".format(i + 1), [3, 3], [2, 2]))
         # introduce a "fake" batch dimension of 1 after flatten so that we can do LSTM over time dim
-        print("Before flat: " + str(x.get_shape()))
-        x = flatten(x)
-        print("After flat: " + str(x.get_shape()))
-
-        x = tf.expand_dims(x, [0])
-        print("After dim_expand: " + str(x.get_shape()))
+        x = tf.expand_dims(flatten(x), [0])
 
         size = 256
         lstm = rnn.rnn_cell.BasicLSTMCell(size, state_is_tuple=True)
         self.state_size = lstm.state_size
         step_size = tf.shape(self.x)[:1]
+
         c_init = np.zeros((1, lstm.state_size.c), np.float32)
         h_init = np.zeros((1, lstm.state_size.h), np.float32)
         self.state_init = [c_init, h_init]
-        c_in = tf.placeholder(tf.float32, [None, lstm.state_size.c], name='c_in')
-        h_in = tf.placeholder(tf.float32, [None, lstm.state_size.h], name='h_in')
+        c_in = tf.placeholder(tf.float32, [1, lstm.state_size.c])
+        h_in = tf.placeholder(tf.float32, [1, lstm.state_size.h])
         self.state_in = [c_in, h_in]
 
         state_in = rnn.rnn_cell.LSTMStateTuple(c_in, h_in)
@@ -77,13 +72,13 @@ class LSTMPolicy(object):
         x = tf.reshape(lstm_outputs, [-1, size])
         self.logits = linear(x, ac_space, "action", normalized_columns_initializer(0.01))
         self.vf = tf.reshape(linear(x, 1, "value", normalized_columns_initializer(1.0)), [-1])
-        self.state_out = [lstm_c[:, :], lstm_h[:, :]]
+        self.state_out = [lstm_c[:1, :], lstm_h[:1, :]]
         self.sample = categorical_sample(self.logits, ac_space)[0, :]
         self.var_list = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, tf.get_variable_scope().name)
-        self.max_q = tf.reduce_max(self.logits, axis=1) + self.vf
-        # tf.add_to_collection("state_out_0", self.state_out[0])
-        # tf.add_to_collection("state_out_1", self.state_out[1])
-        tf.add_to_collection("action_sample", self.sample)
+        tf.add_to_collection("state_out_0", self.state_out[0])
+        tf.add_to_collection("state_out_1", self.state_out[1])
+        self.greedy_action = tf.argmax(self.logits, axis=1)[0]
+        tf.add_to_collection("greedy_action", self.greedy_action)
 
 
     def get_initial_features(self):
@@ -97,10 +92,3 @@ class LSTMPolicy(object):
     def value(self, ob, c, h):
         sess = tf.get_default_session()
         return sess.run(self.vf, {self.x: [ob], self.state_in[0]: c, self.state_in[1]: h})[0]
-
-    def q_max(self, ob, c, h):
-         sess = tf.get_default_session()
-         return sess.run(self.max_q, {self.x: ob, self.state_in[0]: c, self.state_in[1]: h})
-
-
-
