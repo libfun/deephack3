@@ -1,6 +1,6 @@
 ## Public repo with Will Press Lever For Food solution at DeepHack.RL
 
-[rl.deephack.me](rl.deephack.me)
+[rl.deephack.me](http://rl.deephack.me)
 
 Gym submissions:
 - [Skiing-v0](https://gym.openai.com/evaluations/eval_1ezBtrPT2WCCOSGZt1cwA) -3492.77 ± 1.94
